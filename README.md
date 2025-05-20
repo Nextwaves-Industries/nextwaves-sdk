@@ -42,8 +42,8 @@ Detailed documentation for the SDK APIs and reader functionality will be provide
 ## Support
 
 For technical support and questions, please contact:
-- Email: support@nextwaves.com
-- Website: www.nextwaves.com
+- Email: support@nextwaves.industries
+- Website: www.nextwaves.industries
 
 ## License
 
