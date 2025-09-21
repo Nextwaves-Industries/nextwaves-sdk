@@ -1,10 +1,10 @@
-# NextWaves Industries RFID Reader SDK
+# Nextwaves Industries RFID Reader SDK
 
-This repository contains the Software Development Kit (SDK) for the NextWaves Industries RFID Reader.
+This repository contains the Software Development Kit (SDK) for the Nextwaves Industries RFID Reader.
 
 ## Overview
 
-The VMR64 is a high-performance UHF RFID reader designed for industrial applications. This SDK provides the necessary tools and libraries to integrate the reader into your applications.
+The NWR is a high-performance UHF RFID reader designed for industrial applications. This SDK provides the necessary tools and libraries to integrate the reader into your applications.
 
 ## Contents
 
