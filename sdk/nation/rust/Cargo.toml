@@ -1,0 +1,19 @@
+[package]
+name = "nrn-sdk"
+version = "1.0.0"
+edition = "2021"
+authors = ["Nextwaves"]
+description = "Nation RFID Reader SDK for Rust"
+license = "MIT"
+repository = "https://github.com/nextwaves/nextwaves-sdk"
+keywords = ["rfid", "serial", "reader", "nrn", "nation"]
+categories = ["hardware-support", "embedded"]
+
+[dependencies]
+serialport = "4.3"
+thiserror = "1.0"
+log = "0.4"
+byteorder = "1.5"
+
+[dev-dependencies]
+env_logger = "0.10"

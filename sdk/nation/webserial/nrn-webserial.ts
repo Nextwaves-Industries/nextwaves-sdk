@@ -9,6 +9,50 @@
  * @author Nextwaves
  */
 
+// === Web Serial API Type Declarations ===
+// These declarations extend the Navigator interface for Web Serial API support
+declare global {
+  interface Navigator {
+    serial: Serial;
+  }
+
+  interface Serial {
+    requestPort(options?: SerialPortRequestOptions): Promise<SerialPort>;
+    getPorts(): Promise<SerialPort[]>;
+  }
+
+  interface SerialPortRequestOptions {
+    filters?: SerialPortFilter[];
+  }
+
+  interface SerialPortFilter {
+    usbVendorId?: number;
+    usbProductId?: number;
+  }
+
+  interface SerialPort {
+    readable: ReadableStream<Uint8Array> | null;
+    writable: WritableStream<Uint8Array> | null;
+    open(options: SerialOptions): Promise<void>;
+    close(): Promise<void>;
+    getInfo(): SerialPortInfo;
+  }
+
+  interface SerialOptions {
+    baudRate: number;
+    dataBits?: number;
+    stopBits?: number;
+    parity?: 'none' | 'even' | 'odd';
+    bufferSize?: number;
+    flowControl?: 'none' | 'hardware';
+  }
+
+  interface SerialPortInfo {
+    usbVendorId?: number;
+    usbProductId?: number;
+  }
+}
+
 // === Type Definitions ===
 export interface NRNWebSerialOptions {
   baudrate?: number;
@@ -53,6 +97,9 @@ export interface TagData {
   pc: string;
   antenna_id: number;
   rssi: number | null;
+  tid?: string;
+  phase?: number;
+  frequency?: number;
   error?: string;
 }
 
@@ -88,30 +135,70 @@ export const MID = {
   // Reader Configuration
   QUERY_INFO: 0x0100,
   CONFIRM_CONNECTION: 0x12,
-  
+
   // RFID Inventory
   READ_EPC_TAG: (0x02 << 8) | 0x10,
+  PHASE_INVENTORY: 0x0214,
   STOP_INVENTORY: (0x02 << 8) | 0xFF,
   STOP_OPERATION: 0xFF,
   READ_END: 0x1231,
-  
+  WRITE_EPC_TAG: 0x0211,
+
   // Error Handling
   ERROR_NOTIFICATION: 0x00,
-  
+
   // RFID Baseband
   CONFIG_BASEBAND: 0x020B,
   QUERY_BASEBAND: 0x020C,
-  
+
   // Session Management
   SESSION: 0x03,
-  
+
   // Power Control
   CONFIGURE_READER_POWER: 0x0201,
   QUERY_READER_POWER: 0x0202,
-  SET_READER_POWER_CALIBRATION: 0x0103,
-  
+  READER_POWER_CALIBRATION: 0x0103,
+  QUERY_POWER_CALIBRATION: 0x0104,
+
+  // Filter Settings
+  SET_FILTER_SETTINGS: 0x0209,
+  QUERY_FILTER_SETTINGS: 0x020a,
+
+  // RF Band & Frequency
+  SET_RF_BAND: 0x0203,
+  QUERY_RF_BAND: 0x0204,
+  SET_WORKING_FREQUENCY: 0x0205,
+  QUERY_WORKING_FREQUENCY: 0x0206,
+
+  // RFID Ability
+  QUERY_RFID_ABILITY: 0x1000,
+
+  // Antenna Control
+  CONFIGURE_ANTENNA_ENABLE: 0x0203,
+  QUERY_ANTENNA_ENABLE: 0x0202,
+
   // Buzzer Control
-  BUZZER_SWITCH: (0x01 << 8) | 0x1E
+  BUZZER_SWITCH: (0x01 << 8) | 0x1E,
+
+  // GPIO Commands (Category 1)
+  CONFIGURE_GPO: 0x0109,
+  QUERY_GPI: 0x010a,
+  CONFIGURE_GPI_TRIGGER: 0x010b,
+  QUERY_GPI_TRIGGER: 0x010c,
+} as const;
+
+// === Beeper Modes ===
+export const BEEPER_MODES = {
+  QUIET: 0x00,
+  BEEP_AFTER_INVENTORY: 0x01,
+  BEEP_AFTER_TAG: 0x02,
+} as const;
+
+// === RF Profiles ===
+export const RF_PROFILES = {
+  0: { id: 0, name: "Profile 0", description: "Default baseband profile" },
+  1: { id: 1, name: "Profile 1", description: "High performance profile" },
+  2: { id: 2, name: "Profile 2", description: "Dense tag profile" },
 } as const;
 
 // === SDK Exceptions ===
@@ -157,7 +244,7 @@ export class NRNUtils {
    */
   static crc16CCITT(data: Uint8Array): number {
     let crc = 0x0000;
-    
+
     for (const byte of data) {
       crc ^= byte << 8;
       for (let i = 0; i < 8; i++) {
@@ -198,7 +285,7 @@ export class NRNUtils {
       (pcw >> 8) & 0xFF,
       pcw & 0xFF
     ]);
-    
+
     const addrBytes = rs485 ? new Uint8Array([0x00]) : new Uint8Array(0);
     const lengthBytes = new Uint8Array([
       (payload.length >> 8) & 0xFF,
@@ -211,7 +298,7 @@ export class NRNUtils {
       ...lengthBytes,
       ...payload
     ]);
-    
+
     const crcBytes = new Uint8Array([
       (this.crc16CCITT(frameContent) >> 8) & 0xFF,
       this.crc16CCITT(frameContent) & 0xFF
@@ -227,7 +314,7 @@ export class NRNUtils {
     if (raw.length < 9) {
       throw new ProtocolError("Frame too short");
     }
-    
+
     if (raw[0] !== FRAME_HEADER) {
       throw new ProtocolError("Invalid frame header");
     }
@@ -235,8 +322,8 @@ export class NRNUtils {
     let offset = 1; // skip header
 
     // Protocol Control Word
-    const pcw = (raw[offset] << 24) | (raw[offset + 1] << 16) | 
-               (raw[offset + 2] << 8) | raw[offset + 3];
+    const pcw = (raw[offset] << 24) | (raw[offset + 1] << 16) |
+      (raw[offset + 2] << 8) | raw[offset + 3];
     offset += 4;
 
     const protoType = (pcw >> 24) & 0xFF;
@@ -329,6 +416,22 @@ export class NRNUtils {
 
     return frames;
   }
+
+  /**
+   * Calculate RSSI in dBm from raw byte value
+   * Formula aligned with protocols.ts NATION protocol
+   */
+  static calculateRSSI(rssiRaw: number): number {
+    return -100 + Math.round((rssiRaw * 70) / 255);
+  }
+
+  /**
+   * Calculate frequency in MHz from channel index
+   * Formula aligned with protocols.ts NATION protocol
+   */
+  static calculateFrequency(chIdx: number): number {
+    return 920.0 + chIdx * 0.5;
+  }
 }
 
 // === Main NRN WebSerial Class ===
@@ -337,7 +440,7 @@ export class NRNWebSerial {
   private timeout: number;
   private rs485: boolean;
   private onLog: LogCallback;
-  
+
   private port: SerialPort | null = null;
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
@@ -354,7 +457,7 @@ export class NRNWebSerial {
     this.timeout = options.timeout || 500;
     this.rs485 = options.rs485 || false;
     this.onLog = options.onLog || console.log;
-    
+
     this.log('info', `Initialized ${SDK_NAME} v${SDK_VERSION}`);
   }
 
@@ -408,7 +511,7 @@ export class NRNWebSerial {
     try {
       this.log('info', 'Requesting port access...');
       this.port = await navigator.serial.requestPort();
-      
+
       this.log('info', 'Opening port...');
       await this.port.open({
         baudRate: this.baudrate,
@@ -423,10 +526,10 @@ export class NRNWebSerial {
       this.isConnected = true;
 
       this.log('info', `Connected to NRN reader @ ${this.baudrate}bps`);
-      
+
       // Initialize reader
       await this.initializeReader();
-      
+
       return true;
     } catch (error) {
       this.log('error', `Connection failed: ${(error as Error).message}`);
@@ -475,7 +578,7 @@ export class NRNWebSerial {
 
     try {
       await this.writer.write(data);
-      this.log('debug', `Sent ${data.length} bytes: ${Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+      this.log('debug', `Sent ${data.length} bytes: ${Array.from(data).map((b: number) => b.toString(16).padStart(2, '0')).join(' ')}`);
     } catch (error) {
       this.log('error', `Send error: ${(error as Error).message}`);
       throw new ConnectionError(`Send error: ${(error as Error).message}`);
@@ -485,7 +588,7 @@ export class NRNWebSerial {
   /**
    * Receive data from the reader
    */
-  async receive(size: number = 64): Promise<Uint8Array> {
+  async receive(): Promise<Uint8Array> {
     if (!this.isConnected || !this.reader) {
       throw new ConnectionError("Not connected to reader");
     }
@@ -495,8 +598,8 @@ export class NRNWebSerial {
       if (done) {
         throw new ConnectionError("Reader stream ended");
       }
-      
-      this.log('debug', `Received ${value.length} bytes: ${Array.from(value).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+
+      this.log('debug', `Received ${value.length} bytes: ${Array.from(value).map((b: number) => b.toString(16).padStart(2, '0')).join(' ')}`);
       return value;
     } catch (error) {
       this.log('error', `Receive error: ${(error as Error).message}`);
@@ -510,21 +613,21 @@ export class NRNWebSerial {
   private async initializeReader(): Promise<boolean> {
     try {
       this.log('info', 'Initializing reader...');
-      
+
       // Send STOP command to ensure idle state
       const stopFrame = NRNUtils.buildFrame(MID.STOP_INVENTORY, new Uint8Array(0));
       await this.send(stopFrame);
-      
+
       await this.delay(100);
-      const raw = await this.receive(64);
-      
+      const raw = await this.receive();
+
       if (!raw || raw.length === 0) {
         this.log('warn', 'No response received during initialization');
         return false;
       }
 
       const frame = NRNUtils.parseFrame(raw);
-      this.log('debug', `MID: 0x${frame.mid.toString(16)}, Data: ${Array.from(frame.data).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+      this.log('debug', `MID: 0x${frame.mid.toString(16)}, Data: ${Array.from(frame.data).map((b: number) => b.toString(16).padStart(2, '0')).join(' ')}`);
 
       if ((frame.mid === 0x01 || frame.mid === (MID.STOP_INVENTORY & 0xFF)) && frame.data[0] === 0x00) {
         this.log('info', 'Reader successfully initialized');
@@ -546,10 +649,10 @@ export class NRNWebSerial {
     try {
       const frame = NRNUtils.buildFrame(MID.QUERY_INFO, new Uint8Array(0));
       await this.send(frame);
-      
+
       await this.delay(100);
-      const raw = await this.receive(128);
-      
+      const raw = await this.receive();
+
       if (!raw) {
         this.log('warn', 'No response received for reader information query');
         return {};
@@ -586,8 +689,8 @@ export class NRNWebSerial {
 
       // Power-on time
       if (offset + 4 <= data.length) {
-        result.power_on_time_sec = (data[offset] << 24) | (data[offset + 1] << 16) | 
-                                  (data[offset + 2] << 8) | data[offset + 3];
+        result.power_on_time_sec = (data[offset] << 24) | (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) | data[offset + 3];
         offset += 4;
       }
 
@@ -636,12 +739,12 @@ export class NRNWebSerial {
 
       const payload = this.buildEPCReadPayload(mask, true);
       const frame = NRNUtils.buildFrame(MID.READ_EPC_TAG, payload, this.rs485);
-      
+
       await this.send(frame);
-      
+
       // Start receiving loop
       this.receiveInventoryLoop();
-      
+
       return true;
     } catch (error) {
       this.log('error', `Inventory start error: ${(error as Error).message}`);
@@ -658,18 +761,18 @@ export class NRNWebSerial {
       this.inventoryCallback = null;
 
       const stopFrame = NRNUtils.buildFrame(MID.STOP_INVENTORY, new Uint8Array(0));
-      this.log('debug', `Sending stop frame: ${Array.from(stopFrame).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
-      
+      this.log('debug', `Sending stop frame: ${Array.from(stopFrame).map((b: number) => b.toString(16).padStart(2, '0')).join(' ')}`);
+
       await this.send(stopFrame);
 
       // Wait for confirmation
       for (let attempt = 0; attempt < 10; attempt++) {
         await this.delay(200);
-        
+
         try {
-          const raw = await this.receive(256);
+          const raw = await this.receive();
           const frames = NRNUtils.extractValidFrames(raw, this.rs485);
-          
+
           for (const frame of frames) {
             try {
               const resp = NRNUtils.parseFrame(frame);
@@ -726,48 +829,120 @@ export class NRNWebSerial {
   }
 
   /**
-   * Build EPC read payload
+   * Build EPC read payload with optional TID reading
+   * Aligned with protocols.ts generateFastSwitchData
    */
-  private buildEPCReadPayload(antennaMask: number, continuous: boolean = true): Uint8Array {
+  private buildEPCReadPayload(antennaMask: number, continuous: boolean = true, includeTid: boolean = false): Uint8Array {
     if (!antennaMask) {
       antennaMask = 0x00000001;
     }
 
-    const maskBytes = new Uint8Array([
+    const data: number[] = [
       (antennaMask >> 24) & 0xFF,
       (antennaMask >> 16) & 0xFF,
       (antennaMask >> 8) & 0xFF,
-      antennaMask & 0xFF
-    ]);
-    
-    const modeByte = new Uint8Array([continuous ? 0x01 : 0x00]);
-    
-    return new Uint8Array([...maskBytes, ...modeByte]);
+      antennaMask & 0xFF,
+      continuous ? 0x01 : 0x00,  // M: Constant reading (Continuous)
+    ];
+
+    // Only add TID reading parameters if includeTid is true
+    if (includeTid) {
+      data.push(0x02);  // PID 0x02: TID reading parameters
+      data.push(0x00);  // Byte 0: TID reading mode (0: self-adaptable)
+      data.push(0x00);  // Byte 1: Word length (0x00 = Auto / Max)
+    }
+
+    return new Uint8Array(data);
   }
 
   /**
-   * Parse EPC tag data
+   * Parse EPC tag data with optional PIDs (RSSI, TID, phase, frequency)
+   * Aligned with protocols.ts NATION protocol parsing
    */
   private parseEPC(data: Uint8Array): TagData {
     try {
+      // 1. Read EPC (Mandatory)
       const epcLen = (data[0] << 8) | data[1];
       const epc = Array.from(data.slice(2, 2 + epcLen))
-        .map(b => b.toString(16).padStart(2, '0'))
+        .map((b: number) => b.toString(16).padStart(2, '0'))
         .join('')
         .toUpperCase();
-      
+
+      // 2. Read PC (Mandatory - 2 bytes)
       const pc = Array.from(data.slice(2 + epcLen, 2 + epcLen + 2))
-        .map(b => b.toString(16).padStart(2, '0'))
+        .map((b: number) => b.toString(16).padStart(2, '0'))
         .join('')
         .toUpperCase();
-      
+
+      // 3. Read Antenna ID (Mandatory - 1 byte)
       const antennaId = data[2 + epcLen + 2];
+
+      // 4. Parse optional PIDs starting after Antenna
       let rssi: number | null = null;
-      
-      if (data.length > 2 + epcLen + 3) {
-        const pid = data[2 + epcLen + 3];
-        if (pid === 0x01) {
-          rssi = data[2 + epcLen + 4];
+      let tid: string | undefined = undefined;
+      let phase: number | undefined = undefined;
+      let frequency: number | undefined = undefined;
+      let cursor = 2 + epcLen + 3;
+
+      while (cursor < data.length) {
+        const pid = data[cursor];
+        cursor++;
+
+        if (pid === 0x01) { // RSSI (1 byte)
+          if (cursor < data.length) {
+            const rssiRaw = data[cursor];
+            // Convert to dBm using formula from protocols.ts
+            rssi = -100 + Math.round((rssiRaw * 70) / 255);
+            cursor += 1;
+          } else break;
+        }
+        else if (pid === 0x02) { // Reading Result (1 byte)
+          if (cursor < data.length) {
+            cursor += 1;
+          } else break;
+        }
+        else if (pid === 0x03) { // TID DATA (Variable length)
+          if (cursor + 1 < data.length) {
+            const tidByteLen = (data[cursor] << 8) | data[cursor + 1];
+            cursor += 2;
+            if (cursor + tidByteLen <= data.length) {
+              tid = Array.from(data.slice(cursor, cursor + tidByteLen))
+                .map((b: number) => b.toString(16).padStart(2, '0'))
+                .join('')
+                .toUpperCase();
+              cursor += tidByteLen;
+            } else break;
+          } else break;
+        }
+        else if (pid === 0x04 || pid === 0x05) { // Tag data area or reserve area (Variable length)
+          if (cursor + 1 < data.length) {
+            const byteLen = (data[cursor] << 8) | data[cursor + 1];
+            cursor += 2 + byteLen;
+          } else break;
+        }
+        else if (pid === 0x06) { // Sub-antenna No (1 byte)
+          cursor += 1;
+        }
+        else if (pid === 0x07) { // UTC reading time (8 bytes)
+          cursor += 8;
+        }
+        else if (pid === 0x08) { // Current frequency (4 bytes, KHz)
+          if (cursor + 3 < data.length) {
+            const freqKHz = (data[cursor] << 24) | (data[cursor + 1] << 16) | (data[cursor + 2] << 8) | data[cursor + 3];
+            frequency = freqKHz / 1000.0;
+            cursor += 4;
+          } else break;
+        }
+        else if (pid === 0x09) { // Current tag phase (1 byte, 0~128)
+          if (cursor < data.length) {
+            const phaseRaw = data[cursor];
+            phase = (phaseRaw / 128.0) * 2 * Math.PI;
+            cursor += 1;
+          } else break;
+        }
+        else {
+          // Unknown PID - skip and continue
+          continue;
         }
       }
 
@@ -775,15 +950,18 @@ export class NRNWebSerial {
         epc,
         pc,
         antenna_id: antennaId,
-        rssi
+        rssi,
+        tid,
+        phase,
+        frequency
       };
     } catch (error) {
-      return { 
-        epc: '', 
-        pc: '', 
-        antenna_id: 0, 
-        rssi: null, 
-        error: `Parse error: ${(error as Error).message}` 
+      return {
+        epc: '',
+        pc: '',
+        antenna_id: 0,
+        rssi: null,
+        error: `Parse error: ${(error as Error).message}`
       };
     }
   }
@@ -803,7 +981,7 @@ export class NRNWebSerial {
 
     while (this.isInventoryRunning) {
       try {
-        const raw = await this.receive(128);
+        const raw = await this.receive();
         if (!raw) {
           await this.delay(10);
           continue;
@@ -881,7 +1059,7 @@ export class NRNWebSerial {
    * Delay execution
    */
   private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
 }
 

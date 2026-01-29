@@ -217,9 +217,11 @@ class MID(IntEnum):
     
     # === RFID Inventory ===
     READ_EPC_TAG = (0x02 << 8) | 0x10
+    PHASE_INVENTORY = 0x0214
     STOP_INVENTORY = (0x02 << 8) | 0xFF
     STOP_OPERATION = 0xFF
     READ_END = 0x1231
+    WRITE_EPC_TAG = 0x0211
     
     # === Error Handling ===
     ERROR_NOTIFICATION = 0x00
@@ -234,10 +236,54 @@ class MID(IntEnum):
     # === Power Control ===
     CONFIGURE_READER_POWER = 0x0201
     QUERY_READER_POWER = 0x0202
-    SET_READER_POWER_CALIBRATION = 0x0103
+    READER_POWER_CALIBRATION = 0x0103
+    QUERY_POWER_CALIBRATION = 0x0104
+    
+    # === Filter Settings ===
+    SET_FILTER_SETTINGS = 0x0209
+    QUERY_FILTER_SETTINGS = 0x020A
+    
+    # === RF Band & Frequency ===
+    SET_RF_BAND = 0x0203
+    QUERY_RF_BAND = 0x0204
+    SET_WORKING_FREQUENCY = 0x0205
+    QUERY_WORKING_FREQUENCY = 0x0206
+    
+    # === RFID Ability ===
+    QUERY_RFID_ABILITY = 0x1000
+    
+    # === Antenna Control ===
+    CONFIGURE_ANTENNA_ENABLE = 0x0203
+    QUERY_ANTENNA_ENABLE = 0x0202
     
     # === Buzzer Control ===
     BUZZER_SWITCH = (0x01 << 8) | 0x1E
+    
+    # === GPIO Commands (Category 1) ===
+    CONFIGURE_GPO = 0x0109
+    QUERY_GPI = 0x010A
+    CONFIGURE_GPI_TRIGGER = 0x010B
+    QUERY_GPI_TRIGGER = 0x010C
+    
+    @classmethod
+    def all_read_end_mids(cls) -> list:
+        """Return all MIDs that indicate read end."""
+        return [0x01, 0x21, 0x31]
+
+
+# === Beeper Modes ===
+BEEPER_MODES = {
+    "QUIET": 0x00,
+    "BEEP_AFTER_INVENTORY": 0x01,
+    "BEEP_AFTER_TAG": 0x02,
+}
+
+# === RF Profiles ===
+RF_PROFILES = {
+    0: {"id": 0, "name": "Profile 0", "description": "Default baseband profile"},
+    1: {"id": 1, "name": "Profile 1", "description": "High performance profile"},
+    2: {"id": 2, "name": "Profile 2", "description": "Dense tag profile"},
+}
 
 
 class NRNReader:
@@ -731,44 +777,143 @@ class NRNReader:
 
 
 
-    def build_epc_read_payload(self,antenna_mask: int, continuous: bool = True) -> bytes:
+    def build_epc_read_payload(self, antenna_mask: int, continuous: bool = True, include_tid: bool = False) -> bytes:
         """
         Build payload for MID = 0x10 (Read EPC Tag).
+        Aligned with protocols.ts generateFastSwitchData.
+        
         Payload Structure:
         - [4 bytes] Antenna mask (bitmask for antennas 0–31), big-endian
-        - [1 byte]  Continuous flag: 0x01 = continuous read, 0x00 = single read
+        - [1 byte]  M: Continuous flag (0x01 = continuous, 0x00 = single read)
+        - [Optional] TID reading parameters if include_tid is True
         """
         if not antenna_mask:
             antenna_mask = 0x00000001
         if not (0 <= antenna_mask <= 0xFFFFFFFF):
             raise ValueError("Antenna mask must be a 32-bit unsigned integer")
-        mask_bytes = antenna_mask.to_bytes(4, byteorder='big')
-        mode_byte = b'\x01' if continuous else b'\x00'
-        return mask_bytes + mode_byte
+        
+        data = list(antenna_mask.to_bytes(4, byteorder='big'))
+        data.append(0x01 if continuous else 0x00)  # M: Constant reading (Continuous)
+        
+        # Only add TID reading parameters if include_tid is true
+        if include_tid:
+            data.append(0x02)  # PID 0x02: TID reading parameters
+            data.append(0x00)  # Byte 0: TID reading mode (0: self-adaptable)
+            data.append(0x00)  # Byte 1: Word length (0x00 = Auto / Max)
+        
+        return bytes(data)
+
+    @staticmethod
+    def calculate_rssi(rssi_raw: int) -> int:
+        """
+        Calculate RSSI in dBm from raw byte value.
+        Formula aligned with protocols.ts NATION protocol.
+        """
+        return -100 + round((rssi_raw * 70) / 255)
+
+    @staticmethod
+    def calculate_frequency(ch_idx: int) -> float:
+        """
+        Calculate frequency in MHz from channel index.
+        Formula aligned with protocols.ts NATION protocol.
+        """
+        return 920.0 + ch_idx * 0.5
 
 
 
     
-    #
     def parse_epc(self, data: bytes) -> dict:
+        """
+        Parse EPC tag data with optional PIDs (RSSI, TID, phase, frequency).
+        Aligned with protocols.ts NATION protocol parsing.
+        """
         try:
+            # 1. Read EPC (Mandatory)
             epc_len = int.from_bytes(data[0:2], 'big')
             epc = data[2:2 + epc_len].hex().upper()
+            
+            # 2. Read PC (Mandatory - 2 bytes)
             pc = data[2 + epc_len:2 + epc_len + 2].hex().upper()
+            
+            # 3. Read Antenna ID (Mandatory - 1 byte)
             antenna_id = data[2 + epc_len + 2]
+
+            # 4. Parse optional PIDs starting after Antenna
             rssi = None
-            if len(data) > 2 + epc_len + 3:
-                pid = data[2 + epc_len + 3]
-                if pid == 0x01:
-                    rssi = data[2 + epc_len + 4]
-                    
-                          
-            return {
+            tid = None
+            phase = None
+            frequency = None
+            cursor = 2 + epc_len + 3
+
+            while cursor < len(data):
+                pid = data[cursor]
+                cursor += 1
+
+                if pid == 0x01:  # RSSI (1 byte)
+                    if cursor < len(data):
+                        rssi_raw = data[cursor]
+                        # Convert to dBm using formula from protocols.ts
+                        rssi = -100 + round((rssi_raw * 70) / 255)
+                        cursor += 1
+                    else:
+                        break
+                elif pid == 0x02:  # Reading Result (1 byte)
+                    if cursor < len(data):
+                        cursor += 1
+                    else:
+                        break
+                elif pid == 0x03:  # TID DATA (Variable length)
+                    if cursor + 1 < len(data):
+                        tid_byte_len = int.from_bytes(data[cursor:cursor + 2], 'big')
+                        cursor += 2
+                        if cursor + tid_byte_len <= len(data):
+                            tid = data[cursor:cursor + tid_byte_len].hex().upper()
+                            cursor += tid_byte_len
+                        else:
+                            break
+                    else:
+                        break
+                elif pid == 0x04 or pid == 0x05:  # Tag data area or reserve area (Variable length)
+                    if cursor + 1 < len(data):
+                        byte_len = int.from_bytes(data[cursor:cursor + 2], 'big')
+                        cursor += 2 + byte_len
+                    else:
+                        break
+                elif pid == 0x06:  # Sub-antenna No (1 byte)
+                    cursor += 1
+                elif pid == 0x07:  # UTC reading time (8 bytes)
+                    cursor += 8
+                elif pid == 0x08:  # Current frequency (4 bytes, KHz)
+                    if cursor + 3 < len(data):
+                        freq_khz = int.from_bytes(data[cursor:cursor + 4], 'big')
+                        frequency = freq_khz / 1000.0
+                        cursor += 4
+                    else:
+                        break
+                elif pid == 0x09:  # Current tag phase (1 byte, 0~128)
+                    if cursor < len(data):
+                        phase_raw = data[cursor]
+                        phase = (phase_raw / 128.0) * 2 * 3.14159265359
+                        cursor += 1
+                    else:
+                        break
+                else:
+                    # Unknown PID - skip and continue
+                    continue
+
+            result = {
                 "epc": epc,
                 "pc": pc,
                 "antenna_id": antenna_id,
                 "rssi": rssi
             }
+            if tid:
+                result["tid"] = tid
+            if phase is not None:
+                result["phase"] = phase
+            if frequency is not None:
+                result["frequency"] = frequency
+            return result
         except Exception as e:
             return {"error": f"Parse error: {e}"}
 

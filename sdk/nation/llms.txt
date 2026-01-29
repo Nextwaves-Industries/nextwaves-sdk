@@ -1,0 +1,349 @@
+# Nation RFID SDK - LLM Context Documentation
+
+> This document is designed for LLM consumption. It provides comprehensive context about the Nation RFID Reader SDK for Python and TypeScript.
+
+## Overview
+
+The Nation SDK enables communication with NRN (Nation RFID Network) readers via serial port. It supports:
+- **Tag inventory** (continuous/single scan)
+- **Tag read/write** operations
+- **Antenna power control** (1-4 ports, 0-33 dBm)
+- **GPIO control** (input triggers, output states)
+- **Reader configuration** (beeper, RF band, baseband)
+
+---
+
+## Python SDK (nrn.py)
+
+### Quick Start
+
+```python
+from nrn import NRNReader, MID, BEEPER_MODES, RF_PROFILES
+
+# Connect to reader
+reader = NRNReader(port="/dev/ttyUSB0", baudrate=115200)
+reader.open()
+
+# Initialize
+if reader.Connect_Reader_And_Initialize():
+    print("Connected!")
+    
+# Query reader info
+info = reader.Query_Reader_Information()
+# Returns: {serial_number, power_on_time_sec, app_version, ...}
+
+# Start inventory with callback
+def on_tag(tag):
+    print(f"EPC: {tag['epc']}, RSSI: {tag['rssi']} dBm, Antenna: {tag['antenna_id']}")
+    
+reader.start_inventory_with_mode(antenna_mask=0x01, callback=on_tag)
+
+# Stop inventory
+reader.stop_inventory()
+
+# Close connection
+reader.close()
+```
+
+### Key Classes
+
+#### NRNReader
+Main SDK class for reader communication.
+
+**Constructor:**
+```python
+NRNReader(port: str, baudrate: int, timeout: float = 0.5)
+```
+
+**Methods:**
+| Method | Description |
+|--------|-------------|
+| `open()` | Open serial connection |
+| `close()` | Close connection |
+| `Connect_Reader_And_Initialize()` | Initialize reader, returns bool |
+| `Query_Reader_Information()` | Get serial number, firmware, etc. |
+| `query_rfid_ability()` | Get min/max power, antenna count |
+| `start_inventory_with_mode(mask, callback)` | Start continuous scan |
+| `stop_inventory()` | Stop scanning |
+| `query_reader_power()` | Get current power settings |
+| `configure_reader_power(powers, persistence)` | Set antenna power |
+| `build_epc_read_payload(mask, continuous, include_tid)` | Build inventory payload |
+| `parse_epc(data)` | Parse tag response |
+| `calculate_rssi(raw)` | Convert raw RSSI to dBm |
+| `calculate_frequency(idx)` | Convert channel to MHz |
+
+#### MID (Message IDs)
+```python
+class MID(IntEnum):
+    # Inventory
+    READ_EPC_TAG = 0x0210
+    PHASE_INVENTORY = 0x0214
+    STOP_INVENTORY = 0x02FF
+    WRITE_EPC_TAG = 0x0211
+    
+    # Power
+    CONFIGURE_READER_POWER = 0x0201
+    QUERY_READER_POWER = 0x0202
+    
+    # GPIO
+    CONFIGURE_GPO = 0x0109
+    QUERY_GPI = 0x010A
+    CONFIGURE_GPI_TRIGGER = 0x010B
+    
+    # Filter/RF
+    SET_FILTER_SETTINGS = 0x0209
+    SET_RF_BAND = 0x0203
+    SET_WORKING_FREQUENCY = 0x0205
+    
+    @classmethod
+    def all_read_end_mids(cls) -> list:
+        return [0x01, 0x21, 0x31]
+```
+
+### Tag Data Structure
+
+When a tag is scanned, parse_epc() returns:
+```python
+{
+    "epc": "E2806810...",    # EPC hex string (12-24 bytes)
+    "pc": "3000",            # Protocol Control word
+    "antenna_id": 1,         # Antenna port (1-4)
+    "rssi": -45,             # Signal strength in dBm
+    "tid": "E2003412...",    # Optional: TID if requested
+    "phase": 3.14159,        # Optional: Phase in radians
+    "frequency": 920.5       # Optional: Frequency in MHz
+}
+```
+
+### RSSI Conversion Formula
+```python
+rssi_dbm = -100 + round((rssi_raw * 70) / 255)
+# Range: -100 dBm to -30 dBm
+```
+
+### Antenna Mask
+
+The antenna mask is a 32-bit bitmask:
+- Antenna 1: `0x00000001`
+- Antenna 2: `0x00000002`
+- Antennas 1+2: `0x00000003`
+- Antennas 1-4: `0x0000000F`
+
+```python
+# Build mask from list
+def build_mask(antennas: list[int]) -> int:
+    mask = 0
+    for ant_id in antennas:
+        mask |= (1 << (ant_id - 1))
+    return mask
+```
+
+### Power Configuration
+
+```python
+# Set power for antennas 1 and 2
+reader.configure_reader_power({
+    1: 30,  # Antenna 1: 30 dBm
+    2: 25,  # Antenna 2: 25 dBm
+}, persistence=True)  # Save after power-down
+
+# Query current power
+powers = reader.query_reader_power()
+# Returns: {1: 30, 2: 25, 3: 30, 4: 30}
+```
+
+### Constants
+
+```python
+BEEPER_MODES = {
+    "QUIET": 0x00,
+    "BEEP_AFTER_INVENTORY": 0x01,
+    "BEEP_AFTER_TAG": 0x02,
+}
+
+RF_PROFILES = {
+    0: {"id": 0, "name": "Profile 0", "description": "Default baseband profile"},
+    1: {"id": 1, "name": "Profile 1", "description": "High performance profile"},
+    2: {"id": 2, "name": "Profile 2", "description": "Dense tag profile"},
+}
+```
+
+---
+
+## TypeScript SDK (nrn-webserial.ts)
+
+### Quick Start (Browser)
+
+```typescript
+import { NRNWebSerial, NRNUtils, MID, BEEPER_MODES } from './nrn-webserial';
+
+// Create reader instance
+const reader = new NRNWebSerial({ baudrate: 115200 });
+
+// Connect (prompts user for port selection)
+await reader.connect();
+
+// Start inventory with callback
+await reader.startInventory([1, 2], (tag) => {
+    console.log(`EPC: ${tag.epc}, RSSI: ${tag.rssi} dBm`);
+});
+
+// Stop
+await reader.stopInventory();
+
+// Disconnect
+await reader.disconnect();
+```
+
+### Key Exports
+
+**Classes:**
+- `NRNWebSerial` - Main reader class
+- `NRNUtils` - Utility functions (CRC, frame parsing)
+
+**Constants:**
+- `MID` - Message ID constants
+- `BEEPER_MODES` - Beeper configuration
+- `RF_PROFILES` - Baseband profiles
+
+**Interfaces:**
+```typescript
+interface TagData {
+  epc: string;
+  pc: string;
+  antenna_id: number;
+  rssi: number | null;
+  tid?: string;
+  phase?: number;
+  frequency?: number;
+}
+```
+
+### NRNUtils Static Methods
+
+```typescript
+// Build protocol frame
+NRNUtils.buildFrame(mid: number, payload: Uint8Array): Uint8Array
+
+// Parse received frame
+NRNUtils.parseFrame(raw: Uint8Array): ParsedFrame
+
+// Extract valid frames from stream
+NRNUtils.extractValidFrames(data: Uint8Array): Uint8Array[]
+
+// RSSI conversion
+NRNUtils.calculateRSSI(rssiRaw: number): number  // Returns dBm
+
+// Frequency conversion
+NRNUtils.calculateFrequency(chIdx: number): number  // Returns MHz
+```
+
+---
+
+## Protocol Details
+
+### Frame Structure (NATION Protocol)
+
+```
+Header: 0x5A (1 byte)
+PCW:    Protocol Control Word (4 bytes)
+        - Byte 0: Protocol Type (0x00)
+        - Byte 1: Protocol Version (0x01)
+        - Byte 2: Flags [RS485, Notify]
+        - Byte 3: [Category, MID]
+Length: Data length (2 bytes, big-endian)
+Data:   Payload (variable)
+CRC:    CRC16-CCITT (2 bytes)
+```
+
+### Inventory Response Payload
+
+```
+EPC Length:   2 bytes (big-endian)
+EPC Data:     N bytes
+PC:           2 bytes
+Antenna ID:   1 byte
+[Optional PIDs]:
+  0x01 RSSI:       1 byte (raw 0-255)
+  0x02 Result:     1 byte
+  0x03 TID:        2 bytes length + N bytes data
+  0x08 Frequency:  4 bytes (KHz, big-endian)
+  0x09 Phase:      1 byte (0-128)
+```
+
+---
+
+## Common Tasks
+
+### Read Multiple Tags
+```python
+tags = []
+def on_tag(tag):
+    tags.append(tag)
+    
+reader.start_inventory_with_mode(0x0F, on_tag)  # All 4 antennas
+time.sleep(5)  # Scan for 5 seconds
+reader.stop_inventory()
+print(f"Found {len(tags)} tags")
+```
+
+### Filter by RSSI
+```python
+def on_tag(tag):
+    if tag['rssi'] and tag['rssi'] > -60:  # Strong signal only
+        print(f"Strong tag: {tag['epc']}")
+```
+
+### Get Unique EPCs
+```python
+seen_epcs = set()
+def on_tag(tag):
+    if tag['epc'] not in seen_epcs:
+        seen_epcs.add(tag['epc'])
+        print(f"New tag: {tag['epc']}")
+```
+
+---
+
+## Error Handling
+
+```python
+from nrn import NextwavesSDKError, ConnectionError, ProtocolError
+
+try:
+    reader.open()
+except ConnectionError as e:
+    print(f"Failed to connect: {e}")
+except ProtocolError as e:
+    print(f"Protocol error: {e}")
+except NextwavesSDKError as e:
+    print(f"SDK error: {e}")
+```
+
+---
+
+## File Locations
+
+```
+sdk/nation/
+├── llms.txt             # This LLM documentation
+├── python/
+│   ├── nrn.py           # Python SDK
+│   ├── example.py       # Usage examples
+│   └── requirements.txt # Dependencies: pyserial
+├── webserial/
+│   ├── nrn-webserial.ts # TypeScript SDK (Web Serial API)
+│   └── protocols.ts     # Protocol definitions
+├── cpp/
+│   ├── nrn.hpp          # C++ header
+│   ├── nrn.cpp          # C++ implementation
+│   └── README.md
+├── rust/
+│   ├── Cargo.toml       # Rust package
+│   ├── src/lib.rs       # Rust SDK
+│   └── README.md
+└── go/
+    ├── go.mod           # Go module
+    ├── nrn.go           # Go SDK
+    └── README.md
+```
