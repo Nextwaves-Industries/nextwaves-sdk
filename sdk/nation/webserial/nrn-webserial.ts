@@ -977,7 +977,7 @@ export class NRNWebSerial {
    * Receive inventory loop
    */
   private async receiveInventoryLoop(): Promise<void> {
-    let buffer = new Uint8Array(0);
+    let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(0);
 
     while (this.isInventoryRunning) {
       try {
@@ -995,7 +995,7 @@ export class NRNWebSerial {
           const lastFrame = frames[frames.length - 1];
           const lastFrameIndex = this.findUint8ArrayIndex(buffer, lastFrame);
           if (lastFrameIndex !== -1) {
-            buffer = buffer.slice(lastFrameIndex + lastFrame.length);
+            buffer = new Uint8Array(buffer.slice(lastFrameIndex + lastFrame.length));
           }
         }
 
@@ -1031,7 +1031,7 @@ export class NRNWebSerial {
   /**
    * Concatenate two Uint8Arrays
    */
-  private concatUint8Arrays(a: Uint8Array, b: Uint8Array): Uint8Array {
+  private concatUint8Arrays(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
     const result = new Uint8Array(a.length + b.length);
     result.set(a);
     result.set(b, a.length);
